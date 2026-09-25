@@ -13,6 +13,13 @@
 --       （字体 huiwen_ming.otf、二维码 github_qr.png，缺失时自动降级处理）
 -- 适配：Kindle / Kobo / PocketBook / Remarkable / Android 电纸书全系
 -- 版本更新：
+--   v2.7.16 一级菜单交互与清理：
+--           ① 样式项（阅读日票/墨痕壁纸/菜单留单台/随机图片）支持**长按整行勾选/取消**
+--              （KOReader 的勾选框列固定在左侧、TouchMenuItem 没有右侧槽位，长按回调是官方支持的方式；
+--               短按文字仍进入各自设置，短按左侧方框仍为切换）；
+--           ② 一级菜单「设备：…」改名为「设备信息：…」（仅菜单；壁纸上的「设备：」行不变）；
+--           ③ **删除「唤醒合并重绘」功能**及其相关代码（设置键/菜单项/汉化/drop 与合并逻辑/
+--              测试钩子）；仅保留 v2.7.14 的「唤醒刷新计数」诊断日志（纯计数、不改行为）。
 --   v2.7.15 新增第四种样式「随机图片」：一级菜单「菜单留单台」下方新增该项（带勾选框），
 --           整屏显示 KOReader 默认图片文件夹（屏保设置 screensaver_dir）里的一张随机图片
 --           （= KOReader 原生随机图片屏保的效果），与其它样式同池轮流/随机；
@@ -230,15 +237,12 @@ do
         ["Order Slip"] = "菜单留单台", -- 菜单样式名（-- 修改：v2.4.5/v2.6.0）
         ["Shared with the reading ticket's lock-screen background."] = "与阅读日票的「锁屏背景」共用此设置。",
         ["Summary display mode"] = "摘要显示模式",
-        -- -- 修改：v2.7.10 唤醒合并重绘（默认关）
-        ["Merge wake-up repaints"] = "唤醒合并重绘",
-        ["When waking up, KOReader asks for several repaints (its own sleep-screen close/full refreshes, plus plugins doing layout work on resume), which looks like 2-4 flashes on e-ink. Enable this to swallow all of them and repaint once, after the wake-up work has settled (~0.25s of silence, 2.5s cap). Off by default: KOReader's original behaviour is left untouched."] = "唤醒时 KOReader 会多次请求重绘（屏保退出时的整屏刷新、以及插件在 resume 时的重排版），e-ink 上表现为连闪 2~4 下。打开本项会在唤醒期把这些请求全部吞掉，等它们安静下来（约 0.25s 无请求，最长 2.5s）再统一重绘一次。默认关闭，即完全不干预 KOReader 原本行为。",
         ["Alternate display"] = "轮流显示",
         ["Random display"] = "随机显示",
         ["Alternate display: checked styles are shown in turn (film → ink stain → menu)."] = "勾选的样式按“阅读日票 → 墨痕壁纸 → 菜单留单台 → 随机图片”顺序轮流显示。",
         ["Random display: a checked style is picked at random each time."] = "每次从已勾选的样式中随机抽取一种显示。",
-        ["Check the left box to include a style; uncheck all styles to fall back to the film strip."] = "勾选左侧方框即把该样式纳入显示池；全部取消勾选时回退阅读日票。",
-        ["Tap the left box to include/exclude this style; tap the text to open its settings."] = "点击左侧方框可勾选/取消；点击文字进入该样式的设置。",
+        ["Check the left box or long-press a style row to include it; uncheck all styles to fall back to the reading ticket."] = "勾选左侧方框或长按整行把样式纳入显示池；全部取消勾选时回退阅读日票。",
+        ["Tap the left box or long-press the row to include/exclude this style; tap the text to open its settings."] = "点击左侧方框或长按整行可勾选/取消；点击文字进入该样式的设置。",
         -- 墨痕壁纸相关（新增）
         ["Ink stain settings"] = "墨痕壁纸设置",
         ["Statistics period"] = "统计周期",
@@ -247,6 +251,7 @@ do
         ["Last 30 days"] = "最近 30 天",
         ["Book list size"] = "书单数量",
         ["Device"] = "设备",
+        ["Device info"] = "设备信息",
         -- -- 修改：v2.7.12 设备栏可自定义输入
         ["Device row text"] = "设备栏文字",
         ["Tap to type your own text for this row (empty = back to auto-detected device info)."] = "点这一栏可自定义文字（留空即恢复自动读取设备信息）。",
@@ -335,9 +340,6 @@ local K = {
     STYLE_INKSTAIN = "inkstain", -- 墨痕壁纸（整合自 inkstain.koplugin）
     STYLE_MENU = "menu",       -- 菜单样式（留台单，-- 修改：v2.4.5 新增第三种样式）
     STYLE_IMAGE = "image",     -- 随机图片样式（-- 修改：v2.7.15：整屏随机图片，KOReader 默认图片文件夹）
-
-    -- 唤醒合并重绘开关（-- 修改：v2.7.10，默认关）
-    WAKE_COALESCE_SETTING = "book_receipt_wake_coalesce",
 
     -- 设备栏自定义文字（-- 修改：v2.7.12，空/未设 = 自动读取）
     DEVICE_TEXT_SETTING = "book_receipt_device_text",
@@ -4843,28 +4845,13 @@ end
 local Screensaver = require("ui/screensaver")
 local orig_screensaver_show = Screensaver.show
 
--- 唤醒合并重绘（-- 修改：v2.7.10，**默认关，不干预 KOReader 默认行为**）
--- 背景：唤醒时 KOReader 会多次请求重绘（ScreenSaverWidget:onCloseWidget 的 setDirty(nil,"full")、
--- Kindle:outofScreenSaver 的 nextTick(setDirty("all","full")），再加上插件在 resume 时的重排版；
--- 日志实测一次唤醒 6 个请求、分属 3 个 _repaint 节拍 = 3~4 次可见整屏更新（e-ink 上看就是连闪）。
--- 打开本项后：唤醒期（Screensaver.close 起）把这些请求全部吞掉，等它们安静下来
--- （250ms 静默去抖，2.5s 硬上限）再统一重绘一次（"ui" 波形，不黑闪），屏幕只更新一次。
--- 关闭时两个包装器（Screensaver.close / UIManager.setDirty）虽然挂着，但一行都不会生效。
-local wake_window_open = false
-local wake_swallowed = 0
-local finishWakeWindow -- 前向声明：定义在守卫内，测试钩子要引用它
-local wakeDiagFinish    -- 同上（唤醒刷新计数诊断的收尾）
-
-local function wakeCoalesceEnabled()
-    return G_reader_settings and G_reader_settings:isTrue(K.WAKE_COALESCE_SETTING)
-end
-
 -- 唤醒刷新计数（-- 修改：v2.7.14，纯诊断，不改变任何行为）：
 -- 唤醒后 3 秒内统计各来源发给 UIManager.setDirty 的请求（widget/mode），窗口结束时打一条 info 汇总。
 -- 用途：两台设备各睡一次、对比这一行，就能看出“为什么这台闪、那台不闪”（请求数与来源差异）。
 local wake_diag_open = false
 local wake_diag_total = 0
 local wake_diag_list = {}
+local wakeDiagFinish -- 前向声明：定义在守卫内，测试钩子要引用它
 
 local function describeRefreshWidget(widget)
     if widget == nil then return "nil" end
@@ -4873,29 +4860,11 @@ local function describeRefreshWidget(widget)
     return tostring(widget)
 end
 
--- 纯判定（供单测）：此刻是否应吞掉这次刷新请求
-local function shouldSwallowWakeRefresh()
-    return wake_window_open and wakeCoalesceEnabled()
-end
-
 if not Screensaver._book_receipt_patched then
 Screensaver._book_receipt_patched = true
 
--- 注意：orig_* 必须在 finishWakeWindow 之前声明，否则 finishWakeWindow 看不到这两个 upvalue
 local orig_ui_set_dirty = UIManager.setDirty
 local orig_screensaver_close = Screensaver.close
-
-finishWakeWindow = function()
-    if not wake_window_open then return end
-    wake_window_open = false
-    if not wakeCoalesceEnabled() then return end
-    logger.info(LOG_TAG, string.format("唤醒合并：吞掉 %d 次刷新请求，统一重绘 1 次", wake_swallowed))
-    -- 绕过自身包装直调原函数：标记全部 widget 为脏 + 只发这一次 "ui" 刷新
-    if orig_ui_set_dirty then orig_ui_set_dirty(UIManager, "all", "ui") end
-end
-
--- 硬上限用独立引用，避免被去抖的 unschedule 一起撤掉
-local function finishWakeWindowHard() finishWakeWindow() end
 
 wakeDiagFinish = function()
     if not wake_diag_open then return end
@@ -4911,12 +4880,6 @@ Screensaver.close = function(self, ...)
     wake_diag_total = 0
     wake_diag_list = {}
     UIManager:scheduleIn(3, wakeDiagFinishHard)
-    if wakeCoalesceEnabled() then
-        wake_window_open = true
-        wake_swallowed = 0
-        UIManager:scheduleIn(2.5, finishWakeWindowHard)
-        logger.dbg(LOG_TAG, "唤醒合并：窗口开启")
-    end
     if not orig_screensaver_close then return end
     return orig_screensaver_close(self, ...)
 end
@@ -4929,14 +4892,6 @@ if orig_ui_set_dirty then
                 wake_diag_list[#wake_diag_list + 1] = string.format("%s/%s",
                     describeRefreshWidget(widget), tostring(refreshtype))
             end
-        end
-        if shouldSwallowWakeRefresh() then
-            wake_swallowed = wake_swallowed + 1
-            logger.dbg(LOG_TAG, string.format("唤醒合并：吞掉刷新#%d widget=%s mode=%s",
-                wake_swallowed, describeRefreshWidget(widget), tostring(refreshtype)))
-            UIManager:unschedule(finishWakeWindow)
-            UIManager:scheduleIn(0.25, finishWakeWindow)
-            return
         end
         return orig_ui_set_dirty(self, widget, refreshtype, refreshregion, refreshdither)
     end
@@ -5093,8 +5048,15 @@ _G.dofile = function(filepath)
                     checkmark_callback = function()
                         setStyleEnabled(style, not isStyleEnabled(style))
                     end,
+                    -- -- 修改：v2.7.16 长按整行 = 勾选/取消。KOReader 的勾选框列固定在左侧
+                    -- （TouchMenuItem 把 checked_widget 作为行的第一个子项，没有右侧槽位），
+                    -- 但官方支持按项注册 hold_callback，故用长按弥补；短按文字仍进入各自设置。
+                    hold_callback = function(touchmenu_instance)
+                        setStyleEnabled(style, not isStyleEnabled(style))
+                        if touchmenu_instance then touchmenu_instance:updateItems() end
+                    end,
                     sub_item_table = sub_items,
-                    help_text = _("Tap the left box to include/exclude this style; tap the text to open its settings."),
+                    help_text = _("Tap the left box or long-press the row to include/exclude this style; tap the text to open its settings."),
                 }
             end
 
@@ -5211,7 +5173,7 @@ _G.dofile = function(filepath)
             -- 设备信息：text_func 每次打开菜单时实时读取当前设备（-- 修改：v2.6.0）
             -- 设备栏（-- 修改：v2.7.12）：显示自动读取的设备信息；点这一栏可自定义文字，留空恢复自动
             local device_info_item = {
-                text_func = function() return getDeviceInfoString(_("Device") .. "：") end,
+                text_func = function() return getDeviceInfoString(_("Device info") .. "：") end,
                 keep_menu_open = true,
                 help_text = _("Tap to type your own text for this row (empty = back to auto-detected device info)."),
                 callback = function(touchmenu_instance)
@@ -5290,21 +5252,10 @@ _G.dofile = function(filepath)
                 },
             }
 
-            -- 唤醒合并重绘（-- 修改：v2.7.10）：默认关，不干预 KOReader 默认行为
-            local wake_coalesce_item = {
-                text = _("Merge wake-up repaints"),
-                help_text = _("When waking up, KOReader asks for several repaints (its own sleep-screen close/full refreshes, plus plugins doing layout work on resume), which looks like 2-4 flashes on e-ink. Enable this to swallow all of them and repaint once, after the wake-up work has settled (~0.25s of silence, 2.5s cap). Off by default: KOReader's original behaviour is left untouched."),
-                checked_func = function() return G_reader_settings:isTrue(K.WAKE_COALESCE_SETTING) end,
-                callback = function()
-                    G_reader_settings:saveSetting(K.WAKE_COALESCE_SETTING,
-                        not G_reader_settings:isTrue(K.WAKE_COALESCE_SETTING))
-                end,
-            }
-
             table.insert(wallpaper_submenu, 7, {
                 text = _("Book receipt settings"),
                 enabled_func = isBookReceiptEnabled,
-                help_text = _("Check the left box to include a style; uncheck all styles to fall back to the film strip."),
+                help_text = _("Check the left box or long-press a style row to include it; uncheck all styles to fall back to the reading ticket."),
                 sub_item_table = {
                     film_menu,
                     inkstain_menu,
@@ -5313,7 +5264,6 @@ _G.dofile = function(filepath)
                     display_mode_menu,
                     -- -- 修改：v2.7.13 设备栏从墨痕壁纸子菜单上移到本级，紧跟“摘要显示模式”
                     device_info_item,
-                    wake_coalesce_item,
                 },
             })
         end
@@ -5346,8 +5296,6 @@ if G_reader_settings and G_reader_settings:isTrue("book_receipt_dev_test") then
         shouldAdaptCenteredBackground = shouldAdaptCenteredBackground,
         wakeDiagFinish = wakeDiagFinish,
         getDeviceInfoString = getDeviceInfoString,
-        shouldSwallowWakeRefresh = shouldSwallowWakeRefresh,
-        finishWakeWindow = finishWakeWindow,
         parsePoemText = parsePoemText,
         parseRecipeText = parseRecipeText,
         parseQuotationText = parseQuotationText,

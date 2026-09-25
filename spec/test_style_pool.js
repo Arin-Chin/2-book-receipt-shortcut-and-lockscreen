@@ -18,7 +18,7 @@ local function __record(_, ...)
     __log_lines[#__log_lines + 1] = table.concat(parts, " ")
 end
 __screensaver_stub = { show = function() end }
--- 可观测的 UIManager：能记录 setDirty 调用（验证“唤醒合并只重绘一次”），其余方法仍为 no-op
+-- 可观测的 UIManager：能记录 setDirty 调用（验证唤醒刷新计数诊断），其余方法仍为 no-op
 __setdirty_calls = {}
 __uimanager_stub = setmetatable({
     setDirty = function(_, widget, mode)
@@ -235,39 +235,7 @@ assert(t.parsePoemText() == poems, "parsePoemText lost its cache (re-parsed on e
 assert(t.parseRecipeText() == recipes, "parseRecipeText lost its cache")
 print("LAZY CONTENT LIBRARY PASSED (" .. #poems .. " 诗词 / " .. recipe_total .. " 菜谱 / " .. #quotations .. " 名言)")
 
--- 唤醒合并重绘（v2.7.10）：默认关（完全不干预 KOReader）；开启后唤醒窗口内全吞掉，静默后统一重绘 1 次
-assert(t.shouldSwallowWakeRefresh and t.finishWakeWindow, "wake-coalesce helpers missing")
-reset()
-assert(t.shouldSwallowWakeRefresh() == false, "must be off by default (KOReader default behaviour untouched)")
-G._s.book_receipt_wake_coalesce = true
-assert(t.shouldSwallowWakeRefresh() == false, "no window before the screensaver closes")
-__screensaver_stub:close() -- 唤醒
-assert(t.shouldSwallowWakeRefresh() == true, "with the option on, wake refreshes must be swallowed")
--- 端到端：窗口内所有刷新请求（包括 full/partial/多来源）都必须被吞，收尾时只发一次 all+ui
-__setdirty_calls = {}
-__uimanager_stub:setDirty(nil, "full")        -- ScreenSaverWidget:onCloseWidget
-__uimanager_stub:setDirty("all", "full")     -- Kindle:outofScreenSaver 的 nextTick
-__uimanager_stub:setDirty("bookshelf", "full")
-__uimanager_stub:setDirty("ReaderUI", "partial")
-assert(#__setdirty_calls == 0, "wake refreshes must be swallowed, got: " .. table.concat(__setdirty_calls, ","))
--- 窗口仍开着时把开关关掉 → 必须立刻停止吞（否则就是“干预了 KOReader 默认行为”）
-G._s.book_receipt_wake_coalesce = nil
-assert(t.shouldSwallowWakeRefresh() == false, "turning the option off mid-window must stop swallowing immediately")
-__uimanager_stub:setDirty("all", "full")
-assert(#__setdirty_calls == 1, "with the option off, refreshes must pass through again")
--- 再打开 → 继续吞；收尾只重绘一次
-G._s.book_receipt_wake_coalesce = true
-__setdirty_calls = {}
-__uimanager_stub:setDirty("all", "full")
-assert(#__setdirty_calls == 0, "re-enabling must swallow again")
-t.finishWakeWindow()
-assert(#__setdirty_calls == 1 and __setdirty_calls[1] == "all/ui",
-    "finish must issue exactly one all+ui repaint, got: " .. table.concat(__setdirty_calls, ","))
-G._s.book_receipt_wake_coalesce = nil
-assert(t.shouldSwallowWakeRefresh() == false, "after the window closes nothing may be swallowed")
-print("WAKE-UP COALESCE (opt-in) PASSED")
-
--- 菜单注入（v2.7.10）：跑一遗补丁的 dofile 钩子，确认“唤醒合并重绘”真挂进了 阅读摘要设置
+-- 菜单注入：跑一遗补丁的 dofile 钩子，确认菜单项真的注入了 阅读摘要设置（含样式项/设备栏）
 local injected = dofile("screensaver_menu.lua")
 assert(injected and injected[1] and injected[1].sub_item_table, "menu injection did not run")
 local wallpaper = injected[1].sub_item_table
@@ -278,19 +246,10 @@ for _, item in ipairs(wallpaper) do
 end
 assert(sleep_item, "sleep-screen radio item not injected")
 assert(settings_item, "Book receipt settings item not injected")
-local subs, coalesce_item = {}, nil
+local subs = {}
 for _, sub in ipairs(settings_item.sub_item_table) do
     subs[#subs + 1] = tostring(sub.text or (sub.text_func and sub.text_func()))
-    if sub.text == "唤醒合并重绘" then coalesce_item = sub end
 end
-assert(coalesce_item, "wake-coalesce toggle not injected; got: " .. table.concat(subs, " | "))
-reset()
-assert(coalesce_item.checked_func() == false, "wake-coalesce must be unchecked by default")
-coalesce_item.callback()
-assert(G_reader_settings:isTrue("book_receipt_wake_coalesce"), "wake-coalesce callback must persist the setting")
-assert(coalesce_item.checked_func() == true, "wake-coalesce must show as checked after toggling")
-coalesce_item.callback()
-assert(not G_reader_settings:isTrue("book_receipt_wake_coalesce"), "wake-coalesce callback must toggle back off")
 -- 阅读日票子菜单（v2.7.11）：原版胶片遗留、对日票无效的两项（内容 / 设置休眠状态显示文字）已删，
 -- 背景 改名 锁屏背景；保留 封面缩放
 local film_item
@@ -326,6 +285,16 @@ end
 assert(device_row and type(device_row.callback) == "function", "device row must be a tappable parent-level item")
 assert(parent_items[device_index - 1].text == "摘要显示模式",
     "device row must sit right below 摘要显示模式, got: " .. tostring(parent_items[device_index - 1].text))
+-- 样式项长按整行 = 勾选/取消（v2.7.16）
+assert(type(film_item.hold_callback) == "function", "film item must support long-press toggle")
+assert(type(image_item.hold_callback) == "function", "image item must support long-press toggle")
+reset()
+assert(t.isStyleEnabled("film") == true and t.isStyleEnabled("image") == false, "fresh: only film enabled")
+local fake_menu = { updateItems = function() end }
+image_item.hold_callback(fake_menu)
+assert(t.isStyleEnabled("image") == true, "long-press must toggle the image style on")
+image_item.hold_callback(fake_menu)
+assert(t.isStyleEnabled("image") == false, "long-press must toggle the image style off again")
 -- 墨痕壁纸子菜单里不再有设备栏（只剩统计周期 / 书单数量）
 assert(inkstain_item and inkstain_item.sub_item_table, "ink stain menu missing")
 local ink_subs = {}
@@ -337,7 +306,7 @@ reset()
 G._s.book_receipt_device_text = "我的电纸书"
 assert(t.getDeviceInfoString("设备：") == "设备：我的电纸书", "custom device text must replace the auto string")
 assert(t.getDeviceInfoString("点单设备：") == "点单设备：我的电纸书", "custom device text must keep the caller's prefix")
-assert(device_row.text_func() == "设备：我的电纸书", "menu row must show the custom text")
+assert(device_row.text_func() == "设备信息：我的电纸书", "menu row must show 设备信息： prefix + custom text")
 G._s.book_receipt_device_text = nil
 print("DEVICE ROW CUSTOM TEXT PASSED")
 
@@ -354,7 +323,7 @@ print("MENU INJECTION PASSED (" .. table.concat(subs, " | ") .. "; film: " .. ta
 assert(t.wakeDiagFinish, "wakeDiagFinish missing")
 reset()
 __setdirty_calls = {}
-__screensaver_stub:close() -- 诊断窗口与「唤醒合并」开关无关，默认就开
+__screensaver_stub:close() -- 诊断窗口默认就开（与任何开关无关）
 __uimanager_stub:setDirty(nil, "full")
 __uimanager_stub:setDirty("all", "full")
 __uimanager_stub:setDirty("bookshelf", "full")
