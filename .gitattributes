@@ -1,0 +1,2 @@
+# KOReader 补丁按 LF 存储/检出，避免 Windows 上被转成 CRLF
+* text=auto eol=lf

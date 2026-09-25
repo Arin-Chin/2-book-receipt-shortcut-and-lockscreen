@@ -1,0 +1,29 @@
+# ── KOReader 运行时产物 ─────────────────────────────────────────
+# 用户设备上的日志（含书籍路径等隐私信息，绝不入库）
+crash.log
+crash.log.*
+*.log
+
+# ── 本地备份 / 临时文件 ─────────────────────────────────────────
+*.bak
+*.bak-*
+*.orig
+*.rej
+
+# ── 测试依赖与生成物（spec/test_style_pool.js 需要 npm i fengari）──
+node_modules/
+package-lock.json
+
+# ── 一次性脚本 / 审计产物 ───────────────────────────────────────
+.*.js
+audit*.html
+
+# ── 编辑器 / 系统 ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
